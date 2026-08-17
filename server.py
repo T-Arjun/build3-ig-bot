@@ -89,6 +89,17 @@ invent a different application URL.
 HISTORY = {}
 HISTORY_MAX_TURNS = 12
 
+# Ephemeral debug trail so /debug can show what happened without needing
+# platform log access. Not for production - remove once this is verified.
+DEBUG_EVENTS = []
+DEBUG_MAX = 20
+
+
+def log_debug_event(entry):
+    entry["ts"] = __import__("datetime").datetime.utcnow().isoformat() + "Z"
+    DEBUG_EVENTS.append(entry)
+    del DEBUG_EVENTS[:-DEBUG_MAX]
+
 
 def call_openai(messages):
     payload = {
@@ -113,7 +124,7 @@ def call_openai(messages):
 def send_instagram_reply(recipient_id, text):
     if not IG_ACCESS_TOKEN:
         print(f"[no IG_ACCESS_TOKEN set - would have replied to {recipient_id}]: {text}")
-        return
+        return {"ok": False, "detail": "IG_ACCESS_TOKEN not set"}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": text}}
     req = urllib.request.Request(
         f"https://graph.instagram.com/v21.0/me/messages?access_token={IG_ACCESS_TOKEN}",
@@ -123,9 +134,13 @@ def send_instagram_reply(recipient_id, text):
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
-            print("sent reply:", resp.read().decode())
+            result = resp.read().decode()
+            print("sent reply:", result)
+            return {"ok": True, "detail": result}
     except urllib.error.HTTPError as e:
-        print("failed to send reply:", e.code, e.read().decode("utf-8", "ignore"))
+        detail = e.read().decode("utf-8", "ignore")
+        print("failed to send reply:", e.code, detail)
+        return {"ok": False, "detail": f"{e.code}: {detail}"}
 
 
 def verify_signature(raw_body, signature_header):
@@ -150,6 +165,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if parsed.path == "/health":
             self._respond(200, b"ok")
+            return
+        if parsed.path == "/debug":
+            self._respond(200, json.dumps(DEBUG_EVENTS, indent=2).encode(), "application/json")
             return
         self._respond(404, b"not found")
 
@@ -183,13 +201,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 history = HISTORY.setdefault(sender_id, [])
                 history.append({"role": "user", "content": text})
                 del history[:-HISTORY_MAX_TURNS]
+                openai_error = None
                 try:
                     reply = call_openai(history)
                 except Exception as e:
+                    openai_error = str(e)
                     print("openai call failed:", e)
                     reply = "sorry, having a technical hiccup - try again in a moment."
                 history.append({"role": "assistant", "content": reply})
-                send_instagram_reply(sender_id, reply)
+                send_result = send_instagram_reply(sender_id, reply)
+                log_debug_event({
+                    "sender_id": sender_id,
+                    "incoming_text": text,
+                    "reply": reply,
+                    "openai_error": openai_error,
+                    "send_result": send_result,
+                })
 
     def _respond(self, code, body, content_type="text/plain"):
         self.send_response(code)
