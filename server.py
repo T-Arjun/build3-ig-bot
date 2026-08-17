@@ -208,30 +208,46 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def handle_event(self, body):
         for entry in body.get("entry", []):
+            # Standard Messenger Platform shape: entry.messaging[]
             for msg_event in entry.get("messaging", []):
-                sender_id = msg_event.get("sender", {}).get("id")
-                text = msg_event.get("message", {}).get("text")
-                if not sender_id or not text:
+                self.process_message(
+                    msg_event.get("sender", {}).get("id"),
+                    msg_event.get("message", {}).get("text"),
+                )
+            # Instagram field-subscription shape: entry.changes[] with
+            # field == "messages" - this is what Meta's dashboard Test
+            # button sends, and what real IG DMs use for this app.
+            for change in entry.get("changes", []):
+                if change.get("field") != "messages":
                     continue
-                history = HISTORY.setdefault(sender_id, [])
-                history.append({"role": "user", "content": text})
-                del history[:-HISTORY_MAX_TURNS]
-                openai_error = None
-                try:
-                    reply = call_openai(history)
-                except Exception as e:
-                    openai_error = str(e)
-                    print("openai call failed:", e)
-                    reply = "sorry, having a technical hiccup - try again in a moment."
-                history.append({"role": "assistant", "content": reply})
-                send_result = send_instagram_reply(sender_id, reply)
-                log_debug_event({
-                    "sender_id": sender_id,
-                    "incoming_text": text,
-                    "reply": reply,
-                    "openai_error": openai_error,
-                    "send_result": send_result,
-                })
+                value = change.get("value", {})
+                self.process_message(
+                    value.get("sender", {}).get("id"),
+                    value.get("message", {}).get("text"),
+                )
+
+    def process_message(self, sender_id, text):
+        if not sender_id or not text:
+            return
+        history = HISTORY.setdefault(sender_id, [])
+        history.append({"role": "user", "content": text})
+        del history[:-HISTORY_MAX_TURNS]
+        openai_error = None
+        try:
+            reply = call_openai(history)
+        except Exception as e:
+            openai_error = str(e)
+            print("openai call failed:", e)
+            reply = "sorry, having a technical hiccup - try again in a moment."
+        history.append({"role": "assistant", "content": reply})
+        send_result = send_instagram_reply(sender_id, reply)
+        log_debug_event({
+            "sender_id": sender_id,
+            "incoming_text": text,
+            "reply": reply,
+            "openai_error": openai_error,
+            "send_result": send_result,
+        })
 
     def _respond(self, code, body, content_type="text/plain"):
         self.send_response(code)
