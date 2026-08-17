@@ -93,6 +93,7 @@ HISTORY_MAX_TURNS = 12
 # platform log access. Not for production - remove once this is verified.
 DEBUG_EVENTS = []
 DEBUG_MAX = 20
+RAW_REQUESTS = []
 
 
 def log_debug_event(entry):
@@ -169,6 +170,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/debug":
             self._respond(200, json.dumps(DEBUG_EVENTS, indent=2).encode(), "application/json")
             return
+        if parsed.path == "/debug/raw":
+            self._respond(200, json.dumps(RAW_REQUESTS, indent=2).encode(), "application/json")
+            return
         self._respond(404, b"not found")
 
     def do_POST(self):
@@ -178,6 +182,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
         sig = self.headers.get("X-Hub-Signature-256", "")
+
+        # Log every attempt unconditionally, before the signature check, so
+        # we can tell "nothing arrived" apart from "arrived, got rejected".
+        RAW_REQUESTS.append({
+            "ts": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+            "headers": dict(self.headers.items()),
+            "body": raw.decode("utf-8", "replace")[:2000],
+            "signature_valid": bool(IG_APP_SECRET) and verify_signature(raw, sig),
+        })
+        del RAW_REQUESTS[:-DEBUG_MAX]
+
         if IG_APP_SECRET and not verify_signature(raw, sig):
             print("rejected webhook: bad signature")
             self._respond(403, b"forbidden")
